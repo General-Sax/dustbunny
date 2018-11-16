@@ -1,10 +1,7 @@
-'''flake8_utils.py
+'''flake8_adapter.py
 Joel Tiura
 '''
-
 from collections import namedtuple
 
 import os
-import sys
-import pandas as pd
 
