@@ -1,59 +1,33 @@
-from datetime import datetime
+'''pylint_adapter.py
+Joel Tiura
+'''
+from io import StringIO
 from collections import namedtuple
-from itertools import takewhile
+from typing import Tuple  # List, , Optional, Dict, Union
+from pylint import epylint
+from .op_utilities import stringio_clean, row_data_to_dataframe
 
-import os
-import pandas as pd
 
-
+PylintResult = namedtuple('PylintResult', ('score', 'data'))
 Score = namedtuple('Score', ('current', 'previous', 'delta'))
-PylintItem = namedtuple('PylintItem', ('line', 'error', 'summary', 'description', 'unkn'))
+PylintItem = namedtuple('PylintItem', ('line', 'column', 'error', 'summary', 'description'))
+
+MSG_TEMPLATE = '{line}:{column}:{msg_id}:{msg}:{symbol}'
 
 
-def load_text(path):
-    with open(os.path.join(path), 'r') as temp_file:
-        text = temp_file.read()
-    return text
+def run_pylint(target_path: str) -> Tuple[StringIO]:
+    cmd = target_path + f" --msg-template={MSG_TEMPLATE}"
+    stdout, stderr = epylint.py_run(cmd, return_std=True)
+    return stdout, stderr
 
 
-def text_from_linting_(linting_target_path, temp_file_path=None):
-    if temp_file_path is None:
-        raw_output_file = os.path.join('./temp_pylint_output.txt')
-    else:
-        raw_output_file = os.path.join(temp_file_path)
-    linting_target = os.path.join(linting_target_path)
-    os.system(f'python -m pylint {linting_target} > {raw_output_file}')
-    text = load_text(raw_output_file)
-    os.system(f'rm {raw_output_file}')
-    return text
+def partition_lines(nontrivial_lines: Tuple[str]) -> Tuple[Tuple[str], str]:
+    body = nontrivial_lines[1:-2]
+    score = nontrivial_lines[-1]
+    return body, score
 
 
-def lines_of_(text):
-    lines = tuple(line.strip() for line in text.strip().split('\n') if line)
-    return lines
-
-
-def partition_(text):
-    lines = lines_of_(text)
-    header = lines[0]
-    body = lines[1:-2]
-    score = lines[-1]
-    return header, body, score
-
-
-def extract_score_line_tuple(preprocessed_lines):
-    ''''''
-    expected_line = preprocessed_lines[-1]
-    if (len(expected_line) > 9) and (expected_line[0:9] == "Your code"):
-        return tuple(expected_line.split())
-    else:
-        for line in preprocessed_lines:
-            if (len(line) > 9) and (line[0:9] == "Your code"):
-                return tuple(line.split())
-    raise RuntimeError("no score line was found!")
-
-
-def string_score_from_(score_line):
+def extract_score_data(score_line: str) -> Score:
     words = score_line.split()
     current = words[6]
     if len(words) == 7:
@@ -62,83 +36,102 @@ def string_score_from_(score_line):
     else:
         previous = words[9][:-1]
         delta = words[10][:-1]
-    score_holder = Score(current, previous, delta)
-    return score_holder
-
-
-def numerical_form_of_(score):
-    assert isinstance(score, Score)
-    num_score = Score(
-        float(score.current.split('/')[0]),
-        float(score.previous.split('/')[0]),
-        float(score.delta)
+    score_data = Score(
+        float(current.split('/')[0]),
+        float(previous.split('/')[0]) if previous else None,
+        float(delta) if delta else None,
     )
-    return num_score
+    return score_data
 
 
-def item_list_from_(body_lines):
-    ''''''
-    colon_split = [line.split(':') for line in body_lines]
-    clean_lines = [[entry.strip() for entry in line[1:]] for line in colon_split]
-    output = []
+def parse_pylint_body_lines(body_lines: Tuple[str]) -> Tuple[PylintItem]:
+    '''
+    '''
+    colon_split = (line.split(':') for line in body_lines)
+    clean_lines = ([entry.strip() for entry in line] for line in colon_split)
+    item_list = []
     for line in clean_lines:
-        if len(line) != 4:
-            raise NotImplementedError('No handling for this line format!')
-
+        if len(line) != 5:
+            raise ValueError(f'No handling for this line format: {line}')
         line_number = line[0]
-        unknown = line[1]
-        error_code = line[2]
-        message = ''.join([char for char in takewhile(lambda x: x != '(', line[3])][:-1])
-        concise = line[3].split('(')[-1][:-1]
-
-        final_line = PylintItem(
+        column = line[1]
+        error = line[2]
+        summary = line[4]
+        description = line[3]
+        item = PylintItem(
             line_number,
-            error_code,
-            concise,
-            message,
-            unknown
+            column,
+            error,
+            summary,
+            description
         )
-        output.append(final_line)
+        item_list.append(item)
+    output = tuple(item_list)
     return output
 
 
-def dataframe_from_(pylint_items):
-    columns = {
-        'LINE': [],
-        'ERROR': [],
-        'SUMMARY': [],
-        'DESCRIPTION': [],
-        '???': [],
-    }
-    for item in pylint_items:
-        columns['LINE'].append(item.line)
-        columns['ERROR'].append(item.error)
-        columns['SUMMARY'].append(item.summary)
-        columns['DESCRIPTION'].append(item.description)
-        columns['???'].append(item.unkn)
-    df = pd.DataFrame(data=columns)
-    return df
-
-
-PylintResult = namedtuple('PylintResult', ('file', 'score', 'data', 'when'))
-
-
-def lint_file(target_path):
-    assert target_path[-3:] == '.py'
-
-    header_line, body_lines, score_line = partition_(text_from_linting_(target_path))
-    result = PylintResult(
-        target_path,
-        numerical_form_of_(string_score_from_(score_line)),
-        dataframe_from_(item_list_from_(body_lines)),
-        datetime.now().ctime(),
-    )
+def process_pylint_stdout(pylint_stdout: StringIO) -> PylintResult:
+    '''
+    '''
+    clean_lines = stringio_clean(pylint_stdout)
+    raw_body, raw_score = partition_lines(clean_lines)
+    body = parse_pylint_body_lines(raw_body)
+    score = extract_score_data(raw_score)
+    data = row_data_to_dataframe(body, PylintItem)
+    result = PylintResult(score, data)
     return result
+    
 
 
-def quick_test_pipe():
-    res = lint_file('./pylint_plugin.py')
-    print(res.file)
-    print(res.score)
-    print(res.when)
-    return res.data
+class Pylinter:
+    msg_template = MSG_TEMPLATE
+
+    def __init__(self, target_path: str) -> type(None):
+        self.target_path = target_path
+        self.result = None
+        self.update()
+
+    # update - core function
+    def retarget(self, new_target: str):
+        self.target_path = new_target
+        self.update()
+
+    # update - API function
+    def update(self) -> type(None):
+        stdout, stderr = run_pylint(self.target_path)
+        # TODO Processing for stderr?
+        self._result = process_pylint_stdout(stdout)
+
+    def report(self):
+        if self.result is None:
+            self.update()
+        report_text = '\n' + f'{self.data}\n'
+        report_text += '\n' + f'SCORE'
+        report_text += '\n' + f' CURRENT: {self.score.current}'
+        report_text += '\n' + f'PREVIOUS: {self.score.previous}'
+        report_text += '\n' + f'  CHANGE: {self.score.delta}\n'
+        return report_text
+
+    def other_report(self):
+        if self.result is None:
+            self.update()
+        df = self.data.LINE
+        df = df.append(self.data.SUMMARY)
+        report_text = '\n' + f'{str(df)}\n'
+        # report_text += '\n' + f'SCORE'
+        # report_text += '\n' + f' CURRENT: {self.score.current}'
+        # report_text += '\n' + f'PREVIOUS: {self.score.previous}'
+        # report_text += '\n' + f'  CHANGE: {self.score.delta}\n'
+        return report_text
+
+    @property
+    def data(self):
+        if self.result is None:
+            return None
+        return self.result.data
+
+    @property
+    def score(self):
+        if self.result is None:
+            return None
+        return self.result.score
